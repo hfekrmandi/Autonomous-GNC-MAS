@@ -37,7 +37,7 @@ def aruco_R_from_range(range):
     # Assuming linear error with a slope of:
     # [x y z phi theta psi]
     # x = [0.0515; 0.0515; 0.018; 0.1324; 0.1324; 0.1324]; # Degrees
-    x = 10*np.transpose([0.01, 0.01, 0.01, 0.01, 0.01, 0.01]) # Radians
+    x = 2*np.transpose([0.01, 0.01, 0.01, 0.01, 0.01, 0.01]) # Radians
     # x = [0.0075; 0.0075; 0.0075; 0.0075; 0.0075; 0.0075]; # 5% of distance
 
     # Slope values are for 3-sigma error, so dividing by 3
@@ -53,7 +53,7 @@ def aruco_R_from_range_3D(range):
     # Assuming linear error with a slope of:
     # [x y z phi theta psi]
     # x = [0.0515; 0.0515; 0.018; 0.1324; 0.1324; 0.1324]; # Degrees
-    x = 10*np.transpose([0.01, 0.01, 0.01]) # Radians
+    x = 20*np.transpose([0.01, 0.01, 0.01]) # Radians
     # x = [0.0075; 0.0075; 0.0075; 0.0075; 0.0075; 0.0075]; # 5% of distance
 
     # Slope values are for 3-sigma error, so dividing by 3
@@ -68,6 +68,12 @@ def aruco_R_from_range_3D(range):
 def theta_2_rotm(theta):
     R = np.array([[np.cos(theta), -np.sin(theta)], [np.sin(theta), np.cos(theta)]])
     return R
+
+
+# Compute the 2D rotation matrix from the angle theta
+def rotm_2_theta(R):
+    theta = np.arctan2(-R[0, 1], R[0, 0])
+    return theta
 
 
 # Converts a quaternion into euler angles, using the euler order described in dse_constants.py
@@ -123,7 +129,7 @@ def state_12D_to_6D(x_12D):
 # Expects a pose in the form: x, y, z, w
 def state_from_pose(pose):
     euler_orientation = quat_from_pose2eul(pose.orientation)
-    x = np.array([pose.position.x, pose.position.y, pose.position.z, euler_orientation])[:, None]
+    x = np.array([pose.position.x, pose.position.y, pose.position.z, euler_orientation[0], euler_orientation[1], euler_orientation[2]])[:, None]
     return x
 
 
@@ -242,6 +248,14 @@ def pose_array_from_measurement(pose_array, z, dim_obs):
     return pose_array
 
 
+# Grab the relevant chunk from the input matrix
+def sub_matrix(matrix, ids, id, size):
+    i = np.where(ids == id)[0][0]
+    i_min = i * size
+    i_max = i_min + size
+    return matrix[i_min:i_max, i_min:i_max]
+
+
 # Fill in a multi-array ROS message type with a 2D input array
 def multi_array_2d_input(mat, multi_arr):
     multi_arr.layout.dim.append(MultiArrayDimension())
@@ -309,13 +323,13 @@ def agent2_to_frame_agent1_3D(agent1_global, agent2_global):
     return z
 
 
-def agent2_from_frame_agent1(agent1_in_agent2, agent2_global):
-    t1 = agent2_global[0:3]
-    r1 = R.from_euler(dse_constants.EULER_ORDER, agent2_global[3:6, 0])
+def agent2_from_frame_agent1(agent2_in_agent1, agent1_global):
+    t1 = agent1_global[0:3]
+    r1 = R.from_euler(dse_constants.EULER_ORDER, agent1_global[3:6, 0])
     R1 = r1.as_dcm()
 
-    t2 = agent1_in_agent2[0:3]
-    r2 = R.from_euler(dse_constants.EULER_ORDER, agent1_in_agent2[3:6, 0])
+    t2 = agent2_in_agent1[0:3]
+    r2 = R.from_euler(dse_constants.EULER_ORDER, agent2_in_agent1[3:6, 0])
     R2 = r2.as_dcm()
 
     tz = (R1.dot(t2) + t1)[:, 0]
@@ -326,16 +340,16 @@ def agent2_from_frame_agent1(agent1_in_agent2, agent2_global):
     return z
 
 
-def agent2_from_frame_agent1_3D(agent2_global, agent1_in_agent2):
-    t1 = agent2_global[0:2, 0]
-    R1 = theta_2_rotm(agent2_global[2, 0])
+def agent2_from_frame_agent1_3D(agent1_global, agent2_in_agent1):
+    t1 = agent1_global[0:2, 0]
+    R1 = theta_2_rotm(agent1_global[2, 0])
 
-    t2 = agent1_in_agent2[0:2, 0]
-    R2 = theta_2_rotm(agent1_in_agent2[2, 0])
+    t2 = agent2_in_agent1[0:2, 0]
+    R2 = theta_2_rotm(agent2_in_agent1[2, 0])
 
     tz = (R1.dot(t2) + t1)
     Rz = R1.dot(R2)
-    rz = [np.arctan2(Rz[0, 1], Rz[0, 0])]
+    rz = [-np.arctan2(Rz[0, 1], Rz[0, 0])]
     z = np.concatenate((tz, rz))[:, None]
     return z
 
@@ -344,10 +358,16 @@ def relative_states_from_global_3D(rel_id, ids, states, dim_state, dim_obs):
     rel_index = np.where(ids == rel_id)[0][0]
     obj_ids = ids[np.where(ids != rel_id)]
 
-    rel_state = states[rel_index: (rel_index + dim_state)]
+    min_index = rel_index * dim_state
+    max_index = min_index + dim_state
+
+    rel_state = states[min_index:max_index]
     indices = np.ones(np.shape(states)[0], dtype=bool)
-    indices[rel_index: (rel_index + dim_state)] = np.zeros((dim_state))
+    indices[min_index:max_index] = np.zeros((dim_state))
     obj_states = states[indices, :]
+
+    # print('agent id: ' + str(rel_id) + ' other ids: ' + str(obj_ids))
+    # print('agent state: ' + str(rel_state) + ' other states: ' + str(obj_states))
 
     transformed_states = np.zeros(np.shape(obj_states))
     for i in range(len(obj_ids)):
@@ -404,7 +424,27 @@ def dual_relative_obs_jacobian_3D(state1, state2):
 
     Jx = [-np.cos(t1), -np.sin(t1), 0, np.cos(t1), np.sin(t1), 0]
     Jy = [np.sin(t1), -np.cos(t1), 0, -np.sin(t1), np.cos(t1), 0]
-    Jt = [0, 0, 1, 0, 0, -1]
+    Jt = [0, 0, -1, 0, 0, 1]
+
+    J = [Jx, Jy, Jt]
+    return J
+
+
+# Compute the observation jacobian H for a 3D-observation system
+# Given two state vectors in the global coordinate system, x1 and x2
+# What is the jacobian of the local observation of x2 from x1
+def jacobian_fixed_to_obs_3D(state1, state2):
+
+    # z = Hx
+    # z = meas from this to object (of object from this, object in frame this)
+    # x = meas from fixed to object (of object from fixed, object in frame fixed)
+    #z = agent2_to_frame_agent1_3D(state1=this_in_frame_fixed, state2=obj_in_frame_fixed)
+
+    [x1, y1, t1] = state1
+    [x2, y2, t2] = state2
+    Jx = [-np.cos(t1), -np.sin(t1), 0, np.cos(t1), np.sin(t1), 0]
+    Jy = [np.sin(t1), -np.cos(t1), 0, -np.sin(t1), np.cos(t1), 0]
+    Jt = [0, 0, -1, 0, 0, 1]
 
     J = [Jx, Jy, Jt]
     return J
@@ -453,8 +493,8 @@ def fill_FQ(id_list, dt, x_11, dim_state, dim_obs):
         i_high = i_low + dim_state
 
         # If we are looking at ID 0, it is a waypoint and as such doesn't move (F is identity matrix)
-        if id_list[i] == -1:
-            Q_0[i_low:i_high, i_low:i_high] = q_distance_3D(dt, x_11, i, dim_state)
+        if id_list[i] < 5:
+            Q_0[i_low:i_high, i_low:i_high] = q_const(dim_state, 0.000001/dt)
             F_0[i_low:i_high, i_low:i_high] = f_eye(dim_state)
         else:
             # Else use the unicycle model
@@ -509,12 +549,62 @@ def fill_RHz(id_list, my_id, observed_ids, observed_poses, x_11, euler_order, di
             z_eul = [z_eul[0]]
             dist = np.linalg.norm(z_pos)
             R_0[i_low:i_high, i_low:i_high] = 1 * aruco_R_from_range_3D(dist)
-            H_0 = h_camera_3D(H_0, x_11, obs_index, index, dim_state, dim_obs)
+            H_0 = h_camera_3D(H_0, x_11, i, obs_index, index, dim_state, dim_obs)
         else:
             z_pos = np.array(observed_poses[i].position.x, observed_poses[i].position.y, observed_poses[i].position.z)
             dist = np.linalg.norm(z_pos)
             R_0[i_low:i_high, i_low:i_high] = 1 * aruco_R_from_range(dist)
-            H_0 = h_camera(H_0, x_11, obs_index, index, dim_state, dim_obs)
+            H_0 = h_camera(H_0, x_11, i, obs_index, index, dim_state, dim_obs)
+
+        z_0[i_low:i_high] = np.concatenate((z_pos, z_eul))[:, None]
+
+    return R_0, H_0, z_0
+
+
+# Fill in the matrices R and H, as well as the vector z
+# R - Measurement Covariance
+# H - Measurement Jacobian
+# z - The measurement itself
+def fill_RHz_fixed(id_list, my_id, observed_ids, observed_poses, x_11, euler_order, dim_state, dim_obs, R_var=0.001):
+    # Define the sizes of each variable
+    n_stored = len(id_list)
+    n_obs = len(observed_ids)
+    R_0 = R_var * np.eye(n_obs * dim_obs)
+    H_0 = np.zeros((n_obs * dim_obs, n_stored * dim_state))
+    z_0 = np.zeros((n_obs * dim_obs, 1))
+
+    # Fill in H and Z
+    for i in range(len(observed_ids)):
+        id = observed_ids[i]
+        index = np.where(id_list == id)[0][0]  # Index of observed agent
+        obs_index = np.where(id_list == my_id)[0][0]  # Index of observing agent
+
+        i_low = dim_obs * i
+        i_high = i_low + dim_obs
+
+        # Compute the euler angles from the quaternion passed in
+        quat = np.zeros(4)
+        quat[0] = observed_poses[i].orientation.x
+        quat[1] = observed_poses[i].orientation.y
+        quat[2] = observed_poses[i].orientation.z
+        quat[3] = observed_poses[i].orientation.w
+        r = R.from_quat(quat)
+        # https://docs.scipy.org/doc/scipy/reference/generated/scipy.spatial.transform.Rotation.from_quat.html
+        z_eul = r.as_euler(euler_order)
+
+        # Different functions for 3D vs. 6D observation
+        if dim_obs == 3:
+            z_pos = np.array([observed_poses[i].position.x, observed_poses[i].position.y])
+            z_eul = [z_eul[0]]
+            dist = np.linalg.norm(z_pos)
+            R_0[i_low:i_high, i_low:i_high] = 1 * aruco_R_from_range_3D(dist)
+            H_0 = h_camera_fixed_3D(H_0, x_11, i, obs_index, index, dim_state, dim_obs)
+        else:
+            return None
+        #     z_pos = np.array(observed_poses[i].position.x, observed_poses[i].position.y, observed_poses[i].position.z)
+        #     dist = np.linalg.norm(z_pos)
+        #     R_0[i_low:i_high, i_low:i_high] = 1 * aruco_R_from_range(dist)
+        #     H_0 = h_camera_fixed(H_0, fixed_state, x_11, i, obs_index, index, dim_state, dim_obs)
 
         z_0[i_low:i_high] = np.concatenate((z_pos, z_eul))[:, None]
 
@@ -542,42 +632,64 @@ def fill_Bu(id_list, my_id, ctrl_ids, x, ctrl, dim_state, dim_obs):
 
         B[i_low:i_high, i_low:i_high] = B_eye(dim_obs)
         if dim_obs == 3:
-            u[i_low:i_high] = np.array([ctrl[i][0], ctrl[i][1], ctrl[i][5]])[:, None]
+            u[i_low+3:i_high+3] = np.array([ctrl[i][0], ctrl[i][1], ctrl[i][4]])[:, None]
         else:
-            u[i_low:i_high] = ctrl[i]
+            u[i_low+6:i_high+6] = ctrl[i]
 
     return B, u
 
 
 # Define the measurement jacobian for a camera (3D-observation)
-def h_camera_3D(H, x, agent1, agent2, dim_state, dim_obs):
+def h_camera_3D(H, x, meas_index, agent1, agent2, dim_state, dim_obs):
     agent1_row_min = dim_state * agent1
     agent1_row_max = agent1_row_min + dim_obs
     agent2_row_min = dim_state * agent2
     agent2_row_max = agent2_row_min + dim_obs
+    meas_row_min = dim_obs * meas_index
+    meas_row_max = meas_row_min + dim_obs
 
     x1 = x[agent1_row_min:agent1_row_max]
     x2 = x[agent2_row_min:agent2_row_max]
 
     Jacobian = np.array(dual_relative_obs_jacobian_3D(x1, x2))
-    H[:, agent1_row_min:agent1_row_max] = Jacobian[:, 0:dim_obs]
-    H[:, agent2_row_min:agent2_row_max] = Jacobian[:, dim_obs:2*dim_obs]
+    H[meas_row_min:meas_row_max, agent1_row_min:agent1_row_max] = Jacobian[:, 0:dim_obs]
+    H[meas_row_min:meas_row_max, agent2_row_min:agent2_row_max] = Jacobian[:, dim_obs:2*dim_obs]
     return H
 
 
 # Define the measurement jacobian for a camera
-def h_camera(H, x, agent1, agent2, dim_state, dim_obs):
+def h_camera(H, x, meas_index, agent1, agent2, dim_state, dim_obs):
     agent1_row_min = dim_state * agent1
     agent1_row_max = agent1_row_min + dim_obs
     agent2_row_min = dim_state * agent2
     agent2_row_max = agent2_row_min + dim_obs
+    meas_row_min = dim_obs * meas_index
+    meas_row_max = meas_row_min + dim_obs
 
     x1 = x[agent1_row_min:agent1_row_max]
     x2 = x[agent2_row_min:agent2_row_max]
 
     Jacobian = np.array(dual_relative_obs_jacobian(x1, x2))
-    H[:, agent1_row_min:agent1_row_max] = Jacobian[:, 0:dim_obs]
-    H[:, agent2_row_min:agent2_row_max] = Jacobian[:, dim_obs:2*dim_obs]
+    H[meas_row_min:meas_row_max, agent1_row_min:agent1_row_max] = Jacobian[:, 0:dim_obs]
+    H[meas_row_min:meas_row_max, agent2_row_min:agent2_row_max] = Jacobian[:, dim_obs:2*dim_obs]
+    return H
+
+
+# Define the measurement jacobian for a camera (3D-observation)
+def h_camera_fixed_3D(H, x, meas_index, agent1, agent2, dim_state, dim_obs):
+    agent1_row_min = dim_state * agent1
+    agent1_row_max = agent1_row_min + dim_obs
+    agent2_row_min = dim_state * agent2
+    agent2_row_max = agent2_row_min + dim_obs
+    meas_row_min = dim_obs * meas_index
+    meas_row_max = meas_row_min + dim_obs
+
+    x1 = x[agent1_row_min:agent1_row_max]
+    x2 = x[agent2_row_min:agent2_row_max]
+
+    Jacobian = np.array(jacobian_fixed_to_obs_3D(x1, x2))
+    H[meas_row_min:meas_row_max, agent1_row_min:agent1_row_max] = Jacobian[:, 0:dim_obs]
+    H[meas_row_min:meas_row_max, agent2_row_min:agent2_row_max] = Jacobian[:, dim_obs:2*dim_obs]
     return H
 
 
@@ -683,8 +795,8 @@ def q_distance_3D(dt, x, agent1, dim_state):
     i_high = i_low + dim_state
 
     # Q is (dt * (x_dot + 0.001) * 5%) ^ 2
-    Q_pos = (dt * (np.linalg.norm(x[i_low+3:i_low+5]) + 0.001) * 0.05) ** 2
-    Q_theta = (dt * (np.linalg.norm(x[i_low+5]) + 0.001) * 0.05) ** 2
+    Q_pos = (dt * (np.linalg.norm(x[i_low+3:i_low+5]) + 0.1) * 0.05) ** 2
+    Q_theta = (dt * (np.linalg.norm(x[i_low+5]) + 0.1) * 0.05) ** 2
 
     # Define the velocity covariance
     Q = 1 * np.eye(dim_state)
@@ -736,3 +848,117 @@ def B_eye(dim_state):
 def B_zeros(dim_state):
     B = np.zeros((dim_state, dim_state))
     return B
+
+
+# Ensures that every agent has the same state variables in the same order
+def get_sorted_agent_states(array_ids, array_Y, array_y, array_I, array_i, dim_state):
+
+    # Build combined list of ids
+        # Still trying to come up with a way to take in data of any form and return vector of ids
+    flat_list = [item for sublist in array_ids for item in sublist]
+    id_list = np.unique(flat_list)
+    id_list = np.sort(id_list)
+    n_agents = len(id_list)
+
+    # Ensure all agents' state variables match the master list
+    # For each agent that sent in data
+    for i in range(len(array_ids)):
+
+        # If the state variable isn't correct, re-order/extend it
+        if not np.array_equal(id_list, array_ids[i]):
+
+            # Build an empty set of variables
+            # Full-size, ready for data to be inserted
+            # Potentially change the initialization?
+            master_Y = 0.01 * np.eye(n_agents * dim_state)
+            master_y = np.zeros((n_agents * dim_state, 1))
+            master_I = np.zeros((n_agents * dim_state, n_agents * dim_state))
+            master_i = np.zeros((n_agents * dim_state, 1))
+
+            # Move the agents' values to the location specified in the master list
+            # Loop through the input data in chunks of (state_dim x state_dim)
+                # Take each block and move it to the correct location in the master arrays
+
+            for agent_row_index in range(len(array_ids[i])):
+                for agent_column_index in range(len(array_ids[i])):
+
+                    # Given a chunk of data and a row and column index,
+                    # grab the row and column ids of the input data
+                    # Find the location of those ids in the master arrays
+                    group_row_index = np.where(id_list == array_ids[i][agent_row_index])[0][0]
+                    group_column_index = np.where(id_list == array_ids[i][agent_column_index])[0][0]
+
+                    # Generate indices (to make the assignment step shorter)
+                    g_row_lo = dim_state * group_row_index
+                    g_row_hi = g_row_lo + dim_state
+                    g_col_lo = dim_state * group_column_index
+                    g_col_hi = g_col_lo + dim_state
+                    a_row_lo = dim_state * agent_row_index
+                    a_row_hi = a_row_lo + dim_state
+                    a_col_lo = dim_state * agent_column_index
+                    a_col_hi = a_col_lo + dim_state
+
+                    # Move this chunk of data to the master arrays
+                    master_Y[g_row_lo:g_row_hi, g_col_lo:g_col_hi] = array_Y[i][a_row_lo:a_row_hi, a_col_lo:a_col_hi]
+                    master_I[g_row_lo:g_row_hi, g_col_lo:g_col_hi] = array_I[i][a_row_lo:a_row_hi, a_col_lo:a_col_hi]
+
+                master_y[g_row_lo:g_row_hi] = array_y[i][a_row_lo:a_row_hi]
+                master_i[g_row_lo:g_row_hi] = array_i[i][a_row_lo:a_row_hi]
+
+            array_ids[i] = id_list
+            array_Y[i] = master_Y
+            array_y[i] = master_y
+            array_I[i] = master_I
+            array_i[i] = master_i
+
+    return array_ids, array_Y, array_y, array_I, array_i
+
+
+def break_agents_into_groups(array_ids, obs_ids):
+    groups = [[0, 1, 2], [3], [4, 5]]
+    return groups
+
+
+def consensus():
+    return
+
+
+def state_to_xyzypr(state):
+    state = state[:, 0]
+    if len(state) == 6:
+        output = np.zeros(6)
+        output[0:2] = state[0:2]
+        output[5] = state[2]
+    else:
+        output = state[0:6]
+    return output
+
+
+def state_cov_to_covariance_matrix(cov):
+    if np.shape(cov)[0] == 6:
+        output_3D = np.zeros((6, 6))
+        output_3D[0:2, 0:2] = cov[0:2, 0:2]
+        output_3D[0:2, 5] = cov[0:2, 2]
+        output_3D[5, 0:2] = cov[2, 0:2]
+        output_3D[5, 5] = cov[2, 2]
+    else:
+        output_3D = cov[0:6, 0:6]
+    return output_3D
+
+
+def rotate_covariance_xyzypr_state(cov, state):
+    cov_rot = np.zeros((6, 6))
+    r = R.from_euler(dse_constants.EULER_ORDER, state[3:6])
+    rotm = r.as_dcm()
+    cov_pos = cov[0:3, 0:3]
+    cov_pos = rotm.dot(cov_pos).dot(rotm.T)
+    cov_rot[0:3, 0:3] = cov_pos
+    cov_rot[3:6, 3:6] = cov[3:6, 3:6]
+    return cov_rot
+
+
+def covariance_to_ros_covariance(cov):
+    ros_cov = np.zeros(36, dtype=np.float64)
+    for i in range(6):
+        ros_cov[6*i : 6*(i+1)] = cov[i, :]
+    return ros_cov
